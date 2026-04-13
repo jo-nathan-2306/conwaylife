@@ -3,6 +3,7 @@ import time
 import pygame
 import sys
 import os
+import math
 
 BAR_H = 160
 TRAIL_DECAY = 6
@@ -194,6 +195,9 @@ def draw_dropdown(screen, font, dd_rect, selected, open_, mx, my, th, GH):
             screen.blit(font.render(name, True, th["text"]),
                         (r.x+10, r.y+(r.h-font.size(name)[1])//2))
 
+# ─── layout constants ───────────────────────────────────────────────
+TRAIL_BINARY_GAP = 20   # extra gap between trail and binary buttons
+
 def make_rects(W, H, GH):
     icon_sz = 36
     ov_gap = 12
@@ -207,14 +211,19 @@ def make_rects(W, H, GH):
 
     r2y = r1y + 52
     icon_bw = 40
-    gridb_rect = pygame.Rect(20,        r2y, icon_bw, icon_bw)
-    theme_rect = pygame.Rect(20+icon_bw+8, r2y, icon_bw, icon_bw)
-    trail_rect = pygame.Rect(20,        r2y, 80, 30)
+
+    gridb_rect  = pygame.Rect(20,              r2y, icon_bw, icon_bw)
+    theme_rect  = pygame.Rect(20+icon_bw+8,    r2y, icon_bw, icon_bw)
+    trail_rect  = pygame.Rect(20,              r2y, 80, 30)   # placeholder kept for compat
+
+    trail_rect2 = pygame.Rect(20 + 2*(icon_bw+8), r2y, 80, icon_bw)
+    # binary button: trail_rect2.right + TRAIL_BINARY_GAP (was just +8 before)
+    binary_rect = pygame.Rect(trail_rect2.right + TRAIL_BINARY_GAP, r2y, icon_bw, icon_bw)
 
     r3y = r2y + 56
 
     return (dd_rect, track_rect, gridb_rect, theme_rect, trail_rect,
-            play_rect, reset_rect, r3y, r2y, icon_bw)
+            play_rect, reset_rect, r3y, r2y, icon_bw, binary_rect, trail_rect2)
 
 SW, SW_GAP = 26, 6
 
@@ -222,13 +231,316 @@ def swatches(y, kind):
     base = 20 if kind == "bg" else 20 + 5*(SW+SW_GAP) + 28
     return {i: pygame.Rect(base + i*(SW+SW_GAP), y, SW, 22) for i in range(5)}
 
+
+# ─── Color Wheel Popup ──────────────────────────────────────────────
+
+def hsv_to_rgb(h, s, v):
+    """h in [0,360], s,v in [0,1] → (r,g,b) each in [0,255]"""
+    h = h % 360
+    hi = int(h / 60) % 6
+    f  = h / 60 - int(h / 60)
+    p  = v * (1 - s)
+    q  = v * (1 - f * s)
+    t  = v * (1 - (1 - f) * s)
+    variants = [(v,t,p),(q,v,p),(p,v,t),(p,q,v),(t,p,v),(v,p,q)]
+    r, g, b = variants[hi]
+    return (int(r*255), int(g*255), int(b*255))
+
+def rgb_to_hsv(r, g, b):
+    r, g, b = r/255, g/255, b/255
+    mx, mn = max(r,g,b), min(r,g,b)
+    d = mx - mn
+    v = mx
+    s = 0 if mx == 0 else d / mx
+    if d == 0:
+        h = 0
+    elif mx == r:
+        h = 60 * ((g - b) / d % 6)
+    elif mx == g:
+        h = 60 * ((b - r) / d + 2)
+    else:
+        h = 60 * ((r - g) / d + 4)
+    return h, s, v
+
+def build_wheel_surface(radius):
+    """Pre-render the hue/saturation wheel (value=1) into a Surface."""
+    size = radius * 2
+    surf = pygame.Surface((size, size), pygame.SRCALPHA)
+    cx = cy = radius
+    for px in range(size):
+        for py in range(size):
+            dx, dy = px - cx, py - cy
+            dist = math.sqrt(dx*dx + dy*dy)
+            if dist <= radius:
+                angle = math.degrees(math.atan2(-dy, dx)) % 360
+                sat   = dist / radius
+                r, g, b = hsv_to_rgb(angle, sat, 1.0)
+                a = 255 if dist <= radius else 0
+                surf.set_at((px, py), (r, g, b, a))
+    return surf
+
+def show_color_wheel(current_color, font_s, main_W, main_H):
+    """
+    Show a color-wheel popup.  Returns the chosen (r,g,b) tuple,
+    or current_color if the user cancels.
+    """
+    WIN_W, WIN_H = 340, 400
+    win = pygame.display.set_mode((WIN_W, WIN_H), pygame.RESIZABLE)
+    pygame.display.set_caption("cell color  —  esc to cancel")
+
+    WHEEL_R   = 120
+    wheel_cx  = WIN_W // 2
+    wheel_cy  = 140
+    bar_x     = 30
+    bar_y     = WIN_H - 110
+    bar_w     = WIN_W - 60
+    bar_h     = 16
+
+    BG        = (20, 20, 20)
+    BORDER    = (70, 70, 70)
+    TEXT_COL  = (210, 210, 210)
+    DIM       = (110, 110, 110)
+
+    wheel_surf = build_wheel_surface(WHEEL_R)
+
+    # Parse current color into HSV
+    h, s, v = rgb_to_hsv(*current_color)
+    chosen = list(current_color)
+
+    # Buttons
+    ok_rect     = pygame.Rect(WIN_W//2 - 90, WIN_H - 46, 80, 30)
+    cancel_rect = pygame.Rect(WIN_W//2 + 10, WIN_H - 46, 80, 30)
+
+    drag_wheel = False
+    drag_val   = False
+    clock      = pygame.time.Clock()
+
+    def hue_sat_to_xy(h, s):
+        angle = math.radians(h)
+        px = wheel_cx + int(s * WHEEL_R * math.cos(angle))
+        py = wheel_cy - int(s * WHEEL_R * math.sin(angle))
+        return px, py
+
+    def xy_to_hue_sat(px, py):
+        dx, dy = px - wheel_cx, py - wheel_cy
+        dist = math.sqrt(dx*dx + dy*dy)
+        sat  = min(dist / WHEEL_R, 1.0)
+        hue  = math.degrees(math.atan2(-dy, dx)) % 360
+        return hue, sat
+
+    def val_x(v):
+        return bar_x + int(v * bar_w)
+
+    def make_val_bar():
+        surf = pygame.Surface((bar_w, bar_h))
+        for bx in range(bar_w):
+            vv = bx / bar_w
+            col = hsv_to_rgb(h, s, vv)
+            pygame.draw.line(surf, col, (bx, 0), (bx, bar_h - 1))
+        return surf
+
+    running = True
+    result  = current_color
+
+    while running:
+        clock.tick(60)
+        mx, my = pygame.mouse.get_pos()
+
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                running = False
+            elif ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_ESCAPE:
+                    running = False
+                elif ev.key == pygame.K_RETURN:
+                    result = tuple(chosen); running = False
+
+            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                # Wheel hit?
+                dx, dy = mx - wheel_cx, my - wheel_cy
+                if math.sqrt(dx*dx + dy*dy) <= WHEEL_R:
+                    drag_wheel = True
+                    h, s = xy_to_hue_sat(mx, my)
+                    chosen = list(hsv_to_rgb(h, s, v))
+                # Value bar hit?
+                elif pygame.Rect(bar_x, bar_y, bar_w, bar_h).collidepoint(mx, my):
+                    drag_val = True
+                    v = max(0.0, min(1.0, (mx - bar_x) / bar_w))
+                    chosen = list(hsv_to_rgb(h, s, v))
+                elif ok_rect.collidepoint(mx, my):
+                    result = tuple(chosen); running = False
+                elif cancel_rect.collidepoint(mx, my):
+                    running = False
+
+            elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+                drag_wheel = drag_val = False
+
+            elif ev.type == pygame.MOUSEMOTION:
+                if drag_wheel:
+                    dx, dy = mx - wheel_cx, my - wheel_cy
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    if dist > 0:
+                        h, s = xy_to_hue_sat(mx, my)
+                        chosen = list(hsv_to_rgb(h, s, v))
+                if drag_val:
+                    v = max(0.0, min(1.0, (mx - bar_x) / bar_w))
+                    chosen = list(hsv_to_rgb(h, s, v))
+
+            elif ev.type == pygame.VIDEORESIZE:
+                WIN_W, WIN_H = ev.w, ev.h
+                win = pygame.display.set_mode((WIN_W, WIN_H), pygame.RESIZABLE)
+
+        # ── draw ──────────────────────────────────────────────────
+        win.fill(BG)
+
+        # title
+        title = font_s.render("cell color", True, TEXT_COL)
+        win.blit(title, (WIN_W//2 - title.get_width()//2, 12))
+
+        # wheel
+        win.blit(wheel_surf, (wheel_cx - WHEEL_R, wheel_cy - WHEEL_R))
+
+        # darken wheel by value
+        if v < 1.0:
+            dark_overlay = pygame.Surface((WHEEL_R*2, WHEEL_R*2), pygame.SRCALPHA)
+            alpha = int((1 - v) * 255)
+            pygame.draw.circle(dark_overlay, (0, 0, 0, alpha), (WHEEL_R, WHEEL_R), WHEEL_R)
+            win.blit(dark_overlay, (wheel_cx - WHEEL_R, wheel_cy - WHEEL_R))
+
+        # wheel border
+        pygame.draw.circle(win, BORDER, (wheel_cx, wheel_cy), WHEEL_R, 1)
+
+        # selector dot on wheel
+        dot_x, dot_y = hue_sat_to_xy(h, s)
+        pygame.draw.circle(win, (0,0,0), (dot_x, dot_y), 7, 2)
+        pygame.draw.circle(win, (255,255,255), (dot_x, dot_y), 6, 2)
+
+        # value bar
+        val_bar = make_val_bar()
+        win.blit(val_bar, (bar_x, bar_y))
+        pygame.draw.rect(win, BORDER, pygame.Rect(bar_x, bar_y, bar_w, bar_h), 1)
+        vx = val_x(v)
+        pygame.draw.circle(win, (255,255,255), (vx, bar_y + bar_h//2), 8, 2)
+        pygame.draw.circle(win, (0,0,0),       (vx, bar_y + bar_h//2), 7, 1)
+
+        # brightness label
+        bl = font_s.render("brightness", True, DIM)
+        win.blit(bl, (bar_x, bar_y - 18))
+
+        # preview swatch
+        swatch_y = bar_y + bar_h + 14
+        preview_rect = pygame.Rect(bar_x, swatch_y, bar_w, 22)
+        pygame.draw.rect(win, tuple(chosen), preview_rect, border_radius=4)
+        pygame.draw.rect(win, BORDER, preview_rect, 1, border_radius=4)
+
+        # hex label
+        hex_str = "#{:02X}{:02X}{:02X}".format(*chosen)
+        hl = font_s.render(hex_str, True, TEXT_COL)
+        win.blit(hl, (WIN_W//2 - hl.get_width()//2, swatch_y + 28))
+
+        # OK / Cancel buttons
+        for rect, label, is_ok in [(ok_rect, "OK", True), (cancel_rect, "cancel", False)]:
+            hov = rect.collidepoint(mx, my)
+            col = (100, 160, 80) if (is_ok and hov) else (60, 100, 50) if is_ok else \
+                  (80, 80, 80) if hov else (50, 50, 50)
+            pygame.draw.rect(win, col, rect, border_radius=5)
+            pygame.draw.rect(win, BORDER, rect, 1, border_radius=5)
+            lt = font_s.render(label, True, TEXT_COL)
+            win.blit(lt, (rect.x + (rect.w - lt.get_width())//2,
+                          rect.y + (rect.h - lt.get_height())//2))
+
+        pygame.display.update()
+
+    # restore main window
+    pygame.display.set_mode((main_W, main_H), pygame.RESIZABLE)
+    pygame.display.set_caption("c0nway_gam3_of_lif3")
+    return result
+
+
+def show_binary_view(cells, font, main_W, main_H):
+    rows, cols = cells.shape
+    char_w = font.size("0")[0]
+    char_h = font.get_height()
+    pad = 20
+    WIN_W = min(cols * char_w + pad * 2, 1400)
+    WIN_H = min(rows * char_h + pad * 2, 900)
+
+    win = pygame.display.set_mode((WIN_W, WIN_H), pygame.RESIZABLE)
+    pygame.display.set_caption("binary view  —  esc or click to close")
+
+    BG    = (10, 10, 10)
+    WHITE = (255, 255, 255)
+    DARK  = (45,  45,  45)
+
+    full_w = cols * char_w + pad * 2
+    full_h = rows * char_h + pad * 2
+    canvas = pygame.Surface((full_w, full_h))
+    canvas.fill(BG)
+
+    zero_surf = font.render("0", True, DARK)
+    one_surf  = font.render("1", True, WHITE)
+
+    for r in range(rows):
+        for c in range(cols):
+            x = pad + c * char_w
+            y = pad + r * char_h
+            canvas.blit(one_surf if cells[r, c] == 1 else zero_surf, (x, y))
+
+    scroll_x = scroll_y = 0
+    max_sx = max(0, full_w - WIN_W)
+    max_sy = max(0, full_h - WIN_H)
+
+    hint_font = pygame.font.SysFont("monospace", 13)
+    hint = hint_font.render("scroll: arrow keys / mouse wheel  |  esc or click to close", True, (80, 80, 80))
+
+    running = True
+    while running:
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                running = False
+            elif ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_ESCAPE:
+                    running = False
+                elif ev.key == pygame.K_LEFT:
+                    scroll_x = max(0, scroll_x - char_w * 5)
+                elif ev.key == pygame.K_RIGHT:
+                    scroll_x = min(max_sx, scroll_x + char_w * 5)
+                elif ev.key == pygame.K_UP:
+                    scroll_y = max(0, scroll_y - char_h * 3)
+                elif ev.key == pygame.K_DOWN:
+                    scroll_y = min(max_sy, scroll_y + char_h * 3)
+            elif ev.type == pygame.MOUSEBUTTONDOWN:
+                if ev.button == 1:
+                    running = False
+                elif ev.button == 4:
+                    scroll_y = max(0, scroll_y - char_h * 3)
+                elif ev.button == 5:
+                    scroll_y = min(max_sy, scroll_y + char_h * 3)
+            elif ev.type == pygame.MOUSEWHEEL:
+                scroll_y = max(0, min(max_sy, scroll_y - ev.y * char_h * 3))
+                scroll_x = max(0, min(max_sx, scroll_x - ev.x * char_w * 3))
+            elif ev.type == pygame.VIDEORESIZE:
+                WIN_W, WIN_H = ev.w, ev.h
+                win = pygame.display.set_mode((WIN_W, WIN_H), pygame.RESIZABLE)
+                max_sx = max(0, full_w - WIN_W)
+                max_sy = max(0, full_h - WIN_H)
+
+        win.fill(BG)
+        win.blit(canvas, (0, 0), area=pygame.Rect(scroll_x, scroll_y, WIN_W, WIN_H))
+        win.blit(hint, (8, WIN_H - hint.get_height() - 6))
+        pygame.display.update()
+
+    pygame.display.set_mode((main_W, main_H), pygame.RESIZABLE)
+    pygame.display.set_caption("c0nway_gam3_of_lif3")
+
+
 def do_render(screen, cells, trail, prev, size, gen, font, font_s,
               sp_idx, tmpl_sel, dd_open, bg, aliven, dragging,
               mx, my, fps, th, show_grid, show_trail, running, W, H, GH,
               icons):
 
     (dd_rect, track_rect, gridb_rect, theme_rect, trail_rect,
-     play_rect, reset_rect, r3y, r2y, icon_bw) = make_rects(W, H, GH)
+     play_rect, reset_rect, r3y, r2y, icon_bw, binary_rect, trail_rect2) = make_rects(W, H, GH)
 
     screen.fill(bg, pygame.Rect(0, 0, W, GH))
 
@@ -280,7 +592,7 @@ def do_render(screen, cells, trail, prev, size, gen, font, font_s,
     theme_icon = icons["light"] if th is DARK else icons["dark"]
     draw_icon_btn(screen, theme_rect, theme_icon, False, theme_rect.collidepoint(mx, my), th)
 
-    trail_rect2 = pygame.Rect(20 + 2*(icon_bw+8), r2y, 80, icon_bw)
+    # Trail button
     c = th["btn_act"] if show_trail else th["btn_hov"] if trail_rect2.collidepoint(mx, my) else th["btn"]
     pygame.draw.rect(screen, c, trail_rect2, border_radius=5)
     pygame.draw.rect(screen, th["div"], trail_rect2, 1, border_radius=5)
@@ -288,27 +600,40 @@ def do_render(screen, cells, trail, prev, size, gen, font, font_s,
     screen.blit(tl, (trail_rect2.x+(trail_rect2.w-tl.get_width())//2,
                      trail_rect2.y+(trail_rect2.h-tl.get_height())//2))
 
+    # Binary view button (with TRAIL_BINARY_GAP spacing)
+    bc = th["btn_hov"] if binary_rect.collidepoint(mx, my) else th["btn"]
+    pygame.draw.rect(screen, bc, binary_rect, border_radius=5)
+    pygame.draw.rect(screen, th["div"], binary_rect, 1, border_radius=5)
+    bl = font_s.render("01", True, th["text"])
+    screen.blit(bl, (binary_rect.x + (binary_rect.w - bl.get_width())//2,
+                     binary_rect.y + (binary_rect.h - bl.get_height())//2))
+
     screen.blit(font_s.render("bg",   True, th["text_dim"]), (20,  r3y-14))
     for i, col in enumerate(th["bg_presets"]):
         r = swatches(r3y, "bg")[i]
         draw_swatch(screen, r, col, r.collidepoint(mx, my), col == bg, th)
 
+    # Cell color label + swatches + color wheel trigger swatch
     cell_lbl_x = 20 + 5*(SW+SW_GAP) + 28
     screen.blit(font_s.render("cell", True, th["text_dim"]), (cell_lbl_x, r3y-14))
     for i, col in enumerate(th["cell_presets"]):
         r = swatches(r3y, "cell")[i]
         draw_swatch(screen, r, col, r.collidepoint(mx, my), col == aliven, th)
 
+    # "⊕" color-wheel trigger button (after the 5 swatches)
+    cw_x = cell_lbl_x + 5*(SW+SW_GAP) + 4
+    cw_rect = pygame.Rect(cw_x, r3y, SW, 22)
+    hov_cw = cw_rect.collidepoint(mx, my)
+    pygame.draw.rect(screen, th["btn_hov"] if hov_cw else th["btn"], cw_rect, border_radius=4)
+    pygame.draw.rect(screen, th["div"], cw_rect, 1, border_radius=4)
+    plus_lbl = font_s.render("+", True, th["text"])
+    screen.blit(plus_lbl, (cw_rect.x+(cw_rect.w-plus_lbl.get_width())//2,
+                            cw_rect.y+(cw_rect.h-plus_lbl.get_height())//2))
+
     draw_dropdown(screen, font_s, dd_rect, tmpl_sel or "select pattern",
                   dd_open, mx, my, th, GH)
 
     pygame.display.update()
-
-def build_reset_text_surf(font, th):
-    t = font.render("R", True, th["text"])
-    s = pygame.Surface((t.get_width()+4, t.get_height()+4), pygame.SRCALPHA)
-    s.blit(t, (2, 2))
-    return s
 
 def main():
     pygame.init()
@@ -392,8 +717,10 @@ def main():
         ctrl = pygame.key.get_mods() & pygame.KMOD_CTRL
         mx, my = pygame.mouse.get_pos()
         (dd_rect, track_rect, gridb_rect, theme_rect, trail_rect,
-         play_rect, reset_rect, r3y, r2y, icon_bw) = make_rects(W, H, GH)
-        trail_rect2 = pygame.Rect(20 + 2*(icon_bw+8), r2y, 80, icon_bw)
+         play_rect, reset_rect, r3y, r2y, icon_bw, binary_rect, trail_rect2) = make_rects(W, H, GH)
+        cell_lbl_x = 20 + 5*(SW+SW_GAP) + 28
+        cw_x = cell_lbl_x + 5*(SW+SW_GAP) + 4
+        cw_trigger_rect = pygame.Rect(cw_x, r3y, SW, 22)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -465,6 +792,20 @@ def main():
                     elif trail_rect2.collidepoint(mx, my):
                         show_trail = not show_trail
                         if not show_trail: reset_trail()
+                        render()
+                    elif binary_rect.collidepoint(mx, my):
+                        was_running = running
+                        running = False
+                        show_binary_view(cells, font_s, W, H)
+                        running = was_running
+                        render()
+                    elif cw_trigger_rect.collidepoint(mx, my):
+                        # Open color wheel popup
+                        was_running = running
+                        running = False
+                        new_color = show_color_wheel(aliven, font_s, W, H)
+                        aliven = new_color
+                        running = was_running
                         render()
                     else:
                         for i, r in swatches(r3y, "bg").items():
