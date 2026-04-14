@@ -2,7 +2,7 @@
 ![](sasas.gif)
 a recreation of John Conway's mathematical game, the Game of Life using pygame.
 
-## Features
+# Features
 **Drawing and editing**
 Left click to place cells, right click to erase, and hold to drag and paint across the grid. All edits are tracked in history so you can step back and undo anything.
 
