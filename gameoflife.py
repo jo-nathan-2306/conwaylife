@@ -800,7 +800,6 @@ def main():
                         running = was_running
                         render()
                     elif cw_trigger_rect.collidepoint(mx, my):
-                        # Open color wheel popup
                         was_running = running
                         running = False
                         new_color = show_color_wheel(aliven, font_s, W, H)
