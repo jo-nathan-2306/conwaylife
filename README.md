@@ -3,7 +3,7 @@
 
 
 
-### A recreation of the famous cellular automation game, John Conway's Game of Life, built in Python with pygame.
+**A recreation of the famous cellular automation game, John Conway's Game of Life, built in Python with pygame.**
 
 
 # Features
