@@ -1,5 +1,6 @@
 # Conway's Game Of Life
 ![](sasas.gif)
+
 a recreation of John Conway's mathematical game, the Game of Life using pygame.
 
 # Features
@@ -7,7 +8,7 @@ a recreation of John Conway's mathematical game, the Game of Life using pygame.
 Left click to place cells, right click to erase, and hold to drag and paint across the grid. All edits are tracked in history so you can step back and undo anything.
 
 **35+ built-in patterns**
-A categorized dropdown with over 35 classic patterns, from still lifes and oscillators to spaceships, guns, and chaotic methuselahs, each placed centered on the grid and ready to run.
+A categorized dropdown with over 35 classic patterns.
 
 **Customizable Simulation Speed**
 Drag the speed slider anywhere from 0.25x to 8x while the simulation is running to control how fast generations tick by.
